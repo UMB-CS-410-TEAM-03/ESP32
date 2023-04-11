@@ -1,0 +1,32 @@
+#include <Arduino.h>
+#include <LiquidCrystal.h>
+#include <SPIFFS.h>
+#include <WiFiClientSecure.h>
+
+#define LED 21
+#define TOUCH_SENSOR 19
+
+const int RS = 13, ENABLE = 12, D4 = 14, D5 = 27, D6 = 26, D7 = 25;
+
+LiquidCrystal lcd(RS, ENABLE, D4, D5, D6, D7);
+
+void setup()
+{
+
+    lcd.begin(16, 2);
+    // pinMode(LED, OUTPUT);
+    // pinMode(TOUCH_SENSOR, INPUT);
+    // lcd->begin(16, 2);
+    lcd.print("hello, world!");
+}
+
+void loop()
+{
+
+    // Turn off the cursor:
+    lcd.noCursor();
+    delay(500);
+    // Turn on the cursor:
+    lcd.cursor();
+    delay(500);
+}

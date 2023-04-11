@@ -1,0 +1,173 @@
+#include <Arduino.h>
+#include <LiquidCrystal.h>
+#include <SPIFFS.h>
+#include <WiFiClientSecure.h>
+#include <iostream>
+#include <string>
+
+// RHS PINS
+#define LCD_WIDTH 8
+#define LCD_HEIGHT 2
+#define RS 4 // OUTPUT
+#define RW 0 // OUTPUT
+#define ENABLE 16 // OUTPUT
+#define D4 17 // OUTPUT
+#define D5 5 // OUTPUT
+#define D6 18 // OUTPUT
+#define D7 19 // OUTPUT
+
+#define TOUCH_SENSOR 15 // INPUT
+
+#define RE_BUTTON 21 // INPUT PULL-UP RESISTOR
+#define RE_CLK 22 // INPUT
+#define RE_DAT 23 // INPUT
+
+// LHS PINS
+#define SERVO 13 // OUTPUT
+#define VIBRATION 12 // INPUT
+#define REED_SWITCH 14 // INPUT
+#define RELAY 27 // OUTPUT
+#define KNOCK 33 // INPUT
+
+using std::string;
+
+LiquidCrystal lcd(RS, RW, ENABLE, D4, D5, D6, D7);
+
+enum DoorStatus {
+    door_open,
+    door_closed
+};
+
+DoorStatus DOOR_STATUS = door_closed;
+string DOOR_OPEN_MESSAGE = "OPEN";
+string DOOR_CLOSED_MESSAGE = "CLOSED";
+unsigned long LAST_CHECK_TIME = 0;
+const unsigned long CHECK_INTERVAL = 1000;
+
+int COUNTER_DISPLAY_MODE = 0;
+int COUNTER = 0;
+int RE_CLK_STATE = LOW;
+int RE_CLK_LAST_STATE = RE_CLK_LAST_STATE;
+
+enum LcdDisplayMode {
+    door,
+    counter
+};
+string DOOR_STRING = "DOOR";
+string COUNTER_STRING = "COUNTER";
+LcdDisplayMode LCD_DISPLAY_MODE = door;
+
+void print_to_lcd(string& message, const int row = 0);
+void RotateStateChanged();
+
+void display_counter(int& counter)
+{
+    static int prev = 0;
+
+    if (counter < 0) {
+        counter = 0;
+    }
+
+    if (counter > 10) {
+        counter = 10;
+    }
+
+    if (counter != prev) {
+        prev = counter;
+        auto str = std::to_string(counter);
+        print_to_lcd(str, 1);
+    }
+}
+
+void setup()
+{
+    pinMode(TOUCH_SENSOR, INPUT);
+
+    pinMode(RE_CLK, INPUT);
+    pinMode(RE_DAT, INPUT);
+    pinMode(RE_BUTTON, INPUT_PULLUP);
+
+    pinMode(KNOCK, INPUT_PULLUP);
+
+    attachInterrupt(digitalPinToInterrupt(RE_DAT), RotateStateChanged, CHANGE);
+
+    lcd.begin(8, 2);
+}
+
+void loop()
+{
+    if (LCD_DISPLAY_MODE == door) {
+        print_to_lcd(DOOR_STRING, 0);
+        if (DOOR_STATUS == door_open) {
+            print_to_lcd(DOOR_OPEN_MESSAGE, 1);
+        } else {
+            print_to_lcd(DOOR_CLOSED_MESSAGE, 1);
+        }
+    } else {
+        print_to_lcd(COUNTER_STRING, 0);
+        display_counter(COUNTER);
+    }
+
+    if (digitalRead(TOUCH_SENSOR) == HIGH) {
+        unsigned long current_time = millis();
+        if (current_time - LAST_CHECK_TIME >= CHECK_INTERVAL) {
+            if (DOOR_STATUS == door_open) {
+                DOOR_STATUS = door_closed;
+            } else {
+                DOOR_STATUS = door_open;
+            }
+            LAST_CHECK_TIME = current_time;
+        }
+    }
+
+    if (digitalRead(RE_BUTTON) == LOW) {
+        unsigned long current_time = millis();
+        if (current_time - LAST_CHECK_TIME >= CHECK_INTERVAL) {
+            if (LCD_DISPLAY_MODE == door) {
+                LCD_DISPLAY_MODE = counter;
+            } else {
+                LCD_DISPLAY_MODE = door;
+            }
+        }
+    }
+
+    if (digitalRead(KNOCK) == LOW) {
+        std::cout << "KNOCK\n";
+    }
+}
+
+void print_to_lcd(string& message, const int row)
+{
+    static string last_messages[LCD_HEIGHT] = {};
+
+    if (row < 0 || row > LCD_HEIGHT) {
+        return;
+    }
+
+    if (message.length() < LCD_WIDTH) {
+        string indent(LCD_WIDTH - message.length(), ' ');
+        message = message + indent;
+    }
+
+    if (last_messages[row] != message) {
+        last_messages[row] = message;
+        std::cout << "WRITTEN to LCD : " << message << '\n';
+        lcd.setCursor(0, row);
+        lcd.write(message.c_str());
+    }
+}
+
+void RotateStateChanged()
+{
+    RE_CLK_STATE = digitalRead(RE_CLK);
+
+    if ((RE_CLK_LAST_STATE == LOW) && (RE_CLK_STATE == HIGH)) {
+        if (digitalRead(RE_DAT) == HIGH) {
+            COUNTER++;
+        } else {
+            COUNTER--;
+        }
+    }
+
+    RE_CLK_LAST_STATE = RE_CLK_STATE;
+}
