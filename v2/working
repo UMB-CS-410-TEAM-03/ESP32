@@ -1,11 +1,23 @@
 #include <Arduino.h>
 #include <LiquidCrystal.h>
 #include <SPIFFS.h>
+#include <Servo.h>
 #include <WiFiClientSecure.h>
 #include <iostream>
+#include <map>
+#include <queue>
 #include <string>
+#include <thread>
 
-// RHS PINS
+#include "at_client.h"
+#include "constants.h"
+
+// using std::map;
+using std::deque;
+
+// TOUCH SENSOR
+#define TOUCH_SENSOR 15 // INPUT
+// LCD
 #define LCD_WIDTH 8
 #define LCD_HEIGHT 2
 #define RS 4 // OUTPUT
@@ -16,158 +28,377 @@
 #define D6 18 // OUTPUT
 #define D7 19 // OUTPUT
 
-#define TOUCH_SENSOR 15 // INPUT
-
+// ROTARY ENCODER
+#define RE_STEP_SIZE 20
 #define RE_BUTTON 21 // INPUT PULL-UP RESISTOR
 #define RE_CLK 22 // INPUT
 #define RE_DAT 23 // INPUT
+#define RE_VALUE_MAX 5
+#define RE_VALUE_MIN 0
 
-// LHS PINS
-#define SERVO 13 // OUTPUT
-#define VIBRATION 12 // INPUT
-#define REED_SWITCH 14 // INPUT
-#define RELAY 27 // OUTPUT
-#define KNOCK 33 // INPUT
-
-using std::string;
+// MICRO SERVO
+#define SERVO 13
 
 LiquidCrystal lcd(RS, RW, ENABLE, D4, D5, D6, D7);
 
+Servo servo;
+
+#define AMT_OF_OPERATIONS 4
+enum Event {
+    DELAY_1000,
+    DOOR_OPEN,
+    DOOR_OPENED,
+    DOOR_CLOSE,
+    DOOR_CLOSED,
+    DOOR_HALT = 100,
+    DOOR_OPEN_BY_20,
+    DOOR_CLOSE_BY_20,
+    LCD_SHOW_DOOR_STAT,
+    LCD_SHOW_RE_STAT,
+    SYNC_DOOR,
+    SYNC_RE,
+    RE_CHANGE,
+    RE_SET,
+    RE_INC,
+    RE_DEC,
+};
+static deque<Event> events;
+
 enum DoorStatus {
-    door_open,
-    door_closed
+    opened,
+    closed,
+    opening,
+    closing
 };
+static DoorStatus DOOR_STATUS
+    = DoorStatus::closed;
 
-DoorStatus DOOR_STATUS = door_closed;
-string DOOR_OPEN_MESSAGE = "OPEN";
-string DOOR_CLOSED_MESSAGE = "CLOSED";
-unsigned long LAST_CHECK_TIME = 0;
-const unsigned long CHECK_INTERVAL = 1000;
-
-int COUNTER_DISPLAY_MODE = 0;
-int COUNTER = 0;
-int RE_CLK_STATE = LOW;
-int RE_CLK_LAST_STATE = RE_CLK_LAST_STATE;
-
-enum LcdDisplayMode {
-    door,
-    counter
+enum REStatus {
+    change,
+    set
 };
-string DOOR_STRING = "DOOR";
-string COUNTER_STRING = "COUNTER";
-LcdDisplayMode LCD_DISPLAY_MODE = door;
+static REStatus RE_STATUS = REStatus::set;
+static int RE_VALUE = RE_VALUE_MAX;
 
-void print_to_lcd(string& message, const int row = 0);
-void RotateStateChanged();
+static int SERVO_ANGLE = 0;
 
-void display_counter(int& counter)
-{
-    static int prev = 0;
+static AtClient* at_client;
+static AtKey* door_event_key;
+static AtKey* re_event_key;
+// static AtKey* door_event_updated_key;
 
-    if (counter < 0) {
-        counter = 0;
-    }
+void TouchInterruptHandler();
+void REButtonHandler();
+void RERotateHandler();
+void RECLKRotateHandler();
+void REDATRotateHandler();
 
-    if (counter > 10) {
-        counter = 10;
-    }
-
-    if (counter != prev) {
-        prev = counter;
-        auto str = std::to_string(counter);
-        print_to_lcd(str, 1);
-    }
-}
+int lcd_show_door_stat();
+int lcd_show_re_stat();
+int door_will_open();
+int door_has_opened();
+int door_will_close();
+int door_has_closed();
+int door_sync_status();
+int re_sync_status();
 
 void setup()
 {
+    const auto* chip = new AtSign("@moralbearbanana");
+    const auto* java = new AtSign("@batmanariesbanh");
+
+    const auto keys = keys_reader::read_keys(*chip);
+    at_client = new AtClient(*chip, keys);
+
+    // pkam authenticate into our atServer
+    at_client->pkam_authenticate("hotspot", "12345678");
+
+    door_event_key = new AtKey("door_event", chip, java);
+
+    re_event_key = new AtKey("re_event", chip, java);
+
     pinMode(TOUCH_SENSOR, INPUT);
+    attachInterrupt(digitalPinToInterrupt(TOUCH_SENSOR), TouchInterruptHandler, RISING);
+
+    pinMode(RE_BUTTON, INPUT);
+    attachInterrupt(digitalPinToInterrupt(RE_BUTTON), REButtonHandler, RISING);
 
     pinMode(RE_CLK, INPUT);
     pinMode(RE_DAT, INPUT);
-    pinMode(RE_BUTTON, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(RE_CLK), RERotateHandler, FALLING);
 
-    pinMode(KNOCK, INPUT_PULLUP);
+    lcd.begin(LCD_WIDTH, LCD_HEIGHT);
+    servo.attach(SERVO);
 
-    attachInterrupt(digitalPinToInterrupt(RE_DAT), RotateStateChanged, CHANGE);
-
-    lcd.begin(8, 2);
+    events.push_back(Event::LCD_SHOW_DOOR_STAT);
 }
 
 void loop()
 {
-    if (LCD_DISPLAY_MODE == door) {
-        print_to_lcd(DOOR_STRING, 0);
-        if (DOOR_STATUS == door_open) {
-            print_to_lcd(DOOR_OPEN_MESSAGE, 1);
-        } else {
-            print_to_lcd(DOOR_CLOSED_MESSAGE, 1);
-        }
-    } else {
-        print_to_lcd(COUNTER_STRING, 0);
-        display_counter(COUNTER);
-    }
-
-    if (digitalRead(TOUCH_SENSOR) == HIGH) {
-        unsigned long current_time = millis();
-        if (current_time - LAST_CHECK_TIME >= CHECK_INTERVAL) {
-            if (DOOR_STATUS == door_open) {
-                DOOR_STATUS = door_closed;
-            } else {
-                DOOR_STATUS = door_open;
-            }
-            LAST_CHECK_TIME = current_time;
-        }
-    }
-
-    if (digitalRead(RE_BUTTON) == LOW) {
-        unsigned long current_time = millis();
-        if (current_time - LAST_CHECK_TIME >= CHECK_INTERVAL) {
-            if (LCD_DISPLAY_MODE == door) {
-                LCD_DISPLAY_MODE = counter;
-            } else {
-                LCD_DISPLAY_MODE = door;
-            }
-        }
-    }
-
-    if (digitalRead(KNOCK) == LOW) {
-        std::cout << "KNOCK\n";
-    }
-}
-
-void print_to_lcd(string& message, const int row)
-{
-    static string last_messages[LCD_HEIGHT] = {};
-
-    if (row < 0 || row > LCD_HEIGHT) {
+    if (events.empty()) {
         return;
     }
 
-    if (message.length() < LCD_WIDTH) {
-        string indent(LCD_WIDTH - message.length(), ' ');
-        message = message + indent;
-    }
+    bool event_completed = false;
+    Event event = events.front();
+    events.pop_front();
 
-    if (last_messages[row] != message) {
-        last_messages[row] = message;
-        std::cout << "WRITTEN to LCD : " << message << '\n';
-        lcd.setCursor(0, row);
-        lcd.write(message.c_str());
+    switch (event) {
+    case Event::DELAY_1000: {
+        std::cout << "WORK WORK\n";
+        for (auto n : events) {
+            std::cout << n << ' ';
+        }
+        std::cout << '\n';
+        delay(1000);
+        event_completed = true;
+        break;
+    }
+    case Event::DOOR_OPEN: {
+        door_will_open();
+        event_completed = true;
+        break;
+    }
+    case Event::DOOR_OPENED: {
+        door_has_opened();
+        event_completed = true;
+        break;
+    }
+    case Event::DOOR_OPEN_BY_20: {
+        SERVO_ANGLE = SERVO_ANGLE + (int)(180 / RE_VALUE_MAX);
+        servo.write(SERVO_ANGLE);
+        delay(100);
+        event_completed = true;
+        break;
+    }
+    case Event::DOOR_CLOSE: {
+        door_will_close();
+        event_completed = true;
+        break;
+    }
+    case Event::DOOR_CLOSED: {
+        door_has_closed();
+        event_completed = true;
+        break;
+    }
+    case Event::DOOR_CLOSE_BY_20: {
+        SERVO_ANGLE = SERVO_ANGLE - (int)(180 / RE_VALUE_MAX);
+        servo.write(SERVO_ANGLE);
+        delay(100);
+        event_completed = true;
+        break;
+    }
+    case Event::SYNC_DOOR: {
+        door_sync_status();
+        std::cout << "Updated door_event_key here\n";
+        event_completed = true;
+        break;
+    }
+    case Event::DOOR_HALT: {
+        std::cout << "DOOR HALTED\n";
+
+        if (events.front() == Event::DOOR_HALT) {
+            events.pop_front();
+        }
+        while (events.front() == Event::DELAY_1000) {
+            events.pop_front();
+        }
+        event_completed = true;
+        break;
+    }
+    case Event::RE_CHANGE: {
+        RE_STATUS = REStatus::change;
+        events.push_back(Event::LCD_SHOW_RE_STAT);
+        event_completed = true;
+        break;
+    }
+    case Event::RE_SET: {
+        RE_STATUS = REStatus::set;
+        events.push_back(Event::LCD_SHOW_DOOR_STAT);
+        event_completed = true;
+        break;
+    }
+    case Event::RE_INC: {
+        if (RE_VALUE < RE_VALUE_MAX) {
+            RE_VALUE += 1;
+            events.push_back(Event::LCD_SHOW_RE_STAT);
+        }
+        event_completed = true;
+        break;
+    }
+    case Event::RE_DEC: {
+        if (RE_VALUE > RE_VALUE_MIN) {
+            RE_VALUE -= 1;
+            events.push_back(Event::LCD_SHOW_RE_STAT);
+        }
+        event_completed = true;
+        break;
+    }
+    case Event::SYNC_RE: {
+        re_sync_status();
+        std::cout << "Updated re_event_key here\n";
+        event_completed = true;
+        break;
+    }
+    case Event::LCD_SHOW_DOOR_STAT: {
+        lcd_show_door_stat();
+        event_completed = true;
+        break;
+    }
+    case Event::LCD_SHOW_RE_STAT: {
+        lcd_show_re_stat();
+        event_completed = true;
+        break;
+    }
+    default:
+        event_completed = true;
+        break;
+    }
+    if (!event_completed) {
+        events.push_front(event);
     }
 }
 
-void RotateStateChanged()
+void TouchInterruptHandler()
 {
-    RE_CLK_STATE = digitalRead(RE_CLK);
+    switch (DOOR_STATUS) {
+    case DoorStatus::closed: {
+        events.push_back(Event::DOOR_OPEN);
+        break;
+    }
+    case DoorStatus::opened: {
+        events.push_back(Event::DOOR_CLOSE);
+        break;
+    }
+    case DoorStatus::opening: {
+        events.push_front(Event::DOOR_HALT);
+        break;
+    }
+    case DoorStatus::closing: {
+        events.push_front(Event::DOOR_HALT);
+        break;
+    }
+    }
+}
 
-    if ((RE_CLK_LAST_STATE == LOW) && (RE_CLK_STATE == HIGH)) {
-        if (digitalRead(RE_DAT) == HIGH) {
-            COUNTER++;
-        } else {
-            COUNTER--;
-        }
+static volatile unsigned long RE_TIME = millis();
+
+void REButtonHandler()
+{
+    switch (RE_STATUS) {
+    case REStatus::set: {
+        events.push_back(RE_CHANGE);
+        break;
+    }
+    case REStatus::change: {
+        events.push_back(RE_SET);
+        break;
+    }
+    }
+}
+
+void RERotateHandler()
+{
+    if (RE_STATUS != REStatus::change) {
+        return;
+    }
+    if (millis() - RE_TIME < 1000) {
+        return;
     }
 
-    RE_CLK_LAST_STATE = RE_CLK_STATE;
+    RE_TIME = millis();
+
+    if (digitalRead(RE_DAT)) {
+        events.push_back(Event::RE_INC);
+    } else {
+        events.push_back(Event::RE_DEC);
+    }
+}
+
+int door_will_open()
+{
+    std::cout << "DOOR IS OPENING\n";
+    DOOR_STATUS = DoorStatus::opening;
+    events.push_back(Event::LCD_SHOW_DOOR_STAT);
+    events.push_back(Event::SYNC_DOOR);
+
+    for (int i = 0; i < RE_VALUE; i++) {
+        events.push_back(Event::DOOR_OPEN_BY_20);
+    }
+    events.push_back(Event::DOOR_OPENED);
+    return 1;
+}
+
+int door_has_opened()
+{
+    std::cout << "DOOR IS OPENED\n";
+    DOOR_STATUS = DoorStatus::opened;
+    events.push_back(Event::LCD_SHOW_DOOR_STAT);
+    events.push_back(Event::SYNC_DOOR);
+    return 1;
+}
+
+int door_will_close()
+{
+    std::cout << "DOOR IS CLOSING\n";
+    DOOR_STATUS = DoorStatus::closing;
+    events.push_back(Event::LCD_SHOW_DOOR_STAT);
+    events.push_back(Event::SYNC_DOOR);
+    for (int i = 0; i < RE_VALUE; i++) {
+        events.push_back(Event::DOOR_CLOSE_BY_20);
+    }
+    events.push_back(Event::DOOR_CLOSED);
+    return 1;
+}
+
+int door_has_closed()
+{
+    std::cout << "DOOR IS CLOSED\n";
+    DOOR_STATUS = DoorStatus::closed;
+    events.push_back(Event::LCD_SHOW_DOOR_STAT);
+    events.push_back(Event::SYNC_DOOR);
+    return 1;
+}
+
+int door_sync_status()
+{
+    at_client->put_ak(*door_event_key, std::to_string(DOOR_STATUS));
+    return 1;
+}
+
+int re_sync_status()
+{
+    at_client->put_ak(*re_event_key, std::to_string(RE_VALUE));
+    return 1;
+}
+
+int lcd_show_door_stat()
+{
+    const static std::map<int, std::string> DoorStatusStrings = {
+        { DoorStatus::opened, " Opened " },
+        { DoorStatus::closed, " Closed " },
+        { DoorStatus::opening, "Opening " },
+        { DoorStatus::closing, "Closing " }
+    };
+
+    lcd.setCursor(0, 0);
+    lcd.write("  Door  ");
+    std::string message = DoorStatusStrings.at(DOOR_STATUS);
+    lcd.setCursor(0, 1);
+    lcd.write(message.c_str());
+    return 1;
+}
+
+int lcd_show_re_stat()
+{
+    lcd.setCursor(0, 0);
+    lcd.write("DoorOpen");
+    lcd.setCursor(0, 1);
+    std::string amount = std::to_string(RE_VALUE * RE_STEP_SIZE);
+    while (amount.size() <= 3) {
+        amount = ' ' + amount;
+    }
+    std::string v = " " + amount + " %  ";
+    lcd.write(v.c_str());
+    return 1;
 }
