@@ -1,3 +1,10 @@
+/**
+ * Author: Malav Patel
+ * Description: Purpose of this file is to define a helper class
+ * EventBus that will be used on ESP32 to manage the events that
+ * can occur and created by the application.
+ *
+ */
 #pragma once
 #include <queue>
 #include <string>

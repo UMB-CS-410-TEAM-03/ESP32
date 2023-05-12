@@ -1,3 +1,8 @@
+/**
+ * Author: Malav Patel
+ * Description: Purpose of this file is to implement the
+ * EventBus Class defined in event_bus.h
+ */
 #include "event_bus.h"
 
 template <typename T>

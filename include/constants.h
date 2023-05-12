@@ -1,3 +1,9 @@
+/**
+ * Author: Malav Patel
+ * Description: Purpose of this file is to map the pin
+ * of NodeMCU ESP32 Pins to an Interger mentioned in
+ * the datasheet - https://docs.ai-thinker.com/_media/esp32/docs/nodemcu-32s_product_specification.pdf
+ */
 #pragma once
 
 // Wifi details
