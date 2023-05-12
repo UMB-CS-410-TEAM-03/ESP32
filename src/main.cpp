@@ -42,6 +42,7 @@ using std::to_string;
  * handle the input and output from various pin on EPS32 or from
  * reading the at_sign secondary server.
  */
+/// Event is documented
 enum Event {
     // Sync the status of Door with at_sign secondary server
     SYNC_DOOR,
