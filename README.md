@@ -125,6 +125,11 @@ As you perform the action you can see the UI reflecting those changes to actions
 
 Now on you UI application you can click on the button that is below the Image of the door to perform the action for **Open / Close or Halt**.
 
+
+# Click to see the [Live Demo](https://www.youtube.com/watch?v=zkRcxFOm5uo)
+
+# [Presentaion](./presentation.pdf)
+
 # Code Manual
 
 ```cpp
