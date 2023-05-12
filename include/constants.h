@@ -1,5 +1,6 @@
 #pragma once
 
+// Wifi details
 #define SSID "malav"
 #define PASSWORD "bhaibhai"
 

@@ -1,3 +1,15 @@
+/**
+ * Author: Malav Patel
+ * File: main.cpp
+ * Purpose: This file contains the all the code that
+ * is to be executed on the ESP32 device for the project
+ * of Remote Controlled GarageDoor.
+ *
+ * The file "constants.h" contains Macro definations that
+ * will tie the Pins on ESP32 to Pin Number form the ESP32 pinout.
+ *
+ */
+
 #include <Arduino.h>
 #include <LiquidCrystal.h>
 #include <SPIFFS.h>
@@ -11,61 +23,312 @@
 #include <thread>
 
 #include "at_client.h"
+
+// This import includes the Macros definations that maps the pins
+// to the a number indicated by the Pin Manual of ESP32.
+// It also includes the Wifi details
 #include "constants.h"
+
+#include "event_bus.h"
 
 using std::deque;
 using std::string;
 using std::to_string;
 
-void TouchInterruptHandler();
-void REButtonHandler();
-void RERotateHandler();
-void RECLKRotateHandler();
-void REDATRotateHandler();
+//-------------- GLOBAL VARIABLES ------------------------------------------//
 
-int door_will_open();
-int door_has_opened();
-int door_will_close();
-int door_has_closed();
-int door_is_halted();
-
-int door_open_by_20();
-int door_close_by_20();
-
-int lcd_show_door_stat();
-int lcd_show_re_stat();
-
-int door_sync_status();
-int re_sync_status();
-
-int re_will_change();
-int re_was_set();
-int re_value_increased();
-int re_value_decreased();
-
-LiquidCrystal lcd(RS, RW, ENABLE, D4, D5, D6, D7);
-
-Servo servo;
-
+/**
+ * An Enum mapping the events that can occur or are generated to
+ * handle the input and output from various pin on EPS32 or from
+ * reading the at_sign secondary server.
+ */
 enum Event {
+    // Sync the status of Door with at_sign secondary server
     SYNC_DOOR,
+    // Sync the RE_VALUE with at_sign secondary server
     SYNC_RE,
+    // Occurs when we are required to open the door
     DOOR_OPEN,
+    // Occurs when the door has been opened
     DOOR_OPENED,
+    // Occurs when the door is required to be closed
     DOOR_CLOSE,
+    // Occurs when the door has been closed
     DOOR_CLOSED,
+    // Occurs when we are required to stop the door opening or closing
     DOOR_HALT,
+    // Open 20% of the door
     DOOR_OPEN_BY_20,
+    // Close 20% of the door
     DOOR_CLOSE_BY_20,
+    // On LCD module show the Door Status
     LCD_SHOW_DOOR_STAT,
+    // On LCD module show the RE_VALUE as percentage
     LCD_SHOW_RE_STAT,
+    // Occurs when Rotary Encoder Module button is pressed to change the value
     RE_CHANGE,
+    // Occurs when Rotary Encoder Module button is pressed to set the value
     RE_SET,
+    // Occurs when Rotary Encoder Module is moved in positve side.
     RE_INC,
+    // Occurs when Rotary Encoder Module is moved in negative side.
     RE_DEC,
 };
 
-static int (*(Event_Handlers[15]))() = {
+// A static GLOBAL variable of an helper class EventBus
+static EventBus<Event> events;
+
+/**
+ * An Enum tracking the state of an door to an int.
+ * Door can only in one of the states mentioned below
+ * at one time.
+ */
+enum DoorStatus {
+    opened = 0,
+    closed = 1,
+    opening = 2,
+    closing = 3
+};
+
+/**
+ * An static GLOBAL variable tracking the state of the door.
+ * Will be used by the various event handlers.
+ */
+static DoorStatus DOOR_STATUS
+    = DoorStatus::closed;
+
+/**
+ * An Enum tracking the state of a Rotary Encoder to check if
+ * it signals are ment to be read or its in a passive state
+ * thus ignoring the input from the Signals.
+ */
+enum REStatus {
+    change = 0,
+    set = 1
+};
+
+/**
+ * An static GLOBAL variable tracking the RE button state.
+ * Will be used by various event handlers.
+ */
+static REStatus RE_STATUS = REStatus::set;
+
+/**
+ * An static GLOBAL variable tracking the amount of rotated on the Rotart Encoder.
+ * Will be used by various event handlers.
+ */
+static int RE_VALUE = RE_VALUE_MAX;
+
+/**
+ * An static GLOBAL variable tracking the angle of the Servo Motor.
+ * Will be used by various event handlers.
+ */
+static int SERVO_ANGLE = 0;
+
+/**
+ * The AtSign library client responsible for reading data and storing
+ * data on the AtSign secondary server so that Client Application has
+ * access to it.
+ */
+static AtClient* at_client;
+
+/**
+ *  Responsibe for reading events that has occured from the
+ * client Application.
+ */
+static AtKey* app_events_key;
+/**
+ * Used to update the secondary server with random token that the
+ * client Application has to read before an event is put in app_events_key.
+ */
+static AtKey* event_bus_key;
+/**
+ * Used to update the secondary server with the current status of the door.
+ */
+static AtKey* door_status_key;
+/**
+ * Used to update the secondary server with the current value of the Rotary Encoder.
+ */
+static AtKey* re_value_key;
+
+Servo servo;
+
+/**
+ * Initialise the LCD with the pin in a 4-bit mode.
+ */
+LiquidCrystal lcd(RS, RW, ENABLE, D4, D5, D6, D7);
+
+//-------------- Arduino Interrput Handlers ------------------------------------------//
+
+/**
+ * Description: TouchInterruptHandler() will be used as callback for
+ * arduino attachInterruptHandler method, with RISING mode to handle
+ * the touch event from Capacitve Touch Sensor Module more efficeintly.
+ * The function will be adding the events to event bus based on the state
+ * of constant DOOR_STATUS.
+ * Pre: A static EventBus events and DoorStatus DOOR_STATUS should have been
+ * declared and present in GLOBAL.
+ * Post:
+ * If door is open then event to close the door will be added.
+ * If door is closed then event to open the door will be added.
+ * If door is opening or closing then event to halt the door will be added.
+ */
+
+void TouchInterruptHandler();
+
+/**
+ * Description: REButtonHandler() will be used as callback for
+ * arduino attachInterruptHandler method, with RISING mode to handle
+ * the button press from Rotary Encoder Module more efficeintly.
+ * The function will add events to event bus based on the state of
+ * constant RE_STATUS.
+ * Pre: A static EventBus events and RE_STATUS should have been declared
+ * and present in GLOBAL.
+ * Post:
+ * On Press of the button
+ * If RE is in CHANGE mode then RE_STAUS is set to RE_SET.
+ * If RE is in SET mode then RE_STATUS is set to RE_CHANGE.
+ */
+void REButtonHandler();
+
+/**
+ * Description: RERotateHandler() will be used as callback for
+ * arduino attachInterruptHandler method, with Falling mode to handle
+ * the Output from CLK Pin of Rotary Encoder Module more efficeintly.
+ * The function will add events to event bus if the Rotary Encoder dial
+ * was moved in positive side or negative side.
+ * Pre: A static EventBus events, RE_VALUE and RE_STATUS should have been
+ * declared and present in GLOBAL.
+ * Post:
+ * If the Dial on Rotary Encoder was rotated in positive side
+ * then RE_INC event will be added in EventBus else RE_DEC event will be
+ * added on the event bus.
+ */
+void RERotateHandler();
+
+//-------------- Event Handlers ------------------------------------------//
+
+/**
+ * Description: This function will add all the events in the event bus
+ * that needs to performed for the action of door opening.
+ * Pre: None
+ * Post: Events are added to EventBus
+ */
+void door_will_open();
+/**
+ * Description: This function will add all the event in the event bus
+ * that will needs to be performed when door is opened and will update
+ * the RE_VALUE to RE_MIN to indicate the door has been opened.
+ * Pre: None
+ * Post: Events are added to EventBus
+ */
+void door_has_opened();
+/**
+ * Description: This function will add all the events in th event bus
+ * that needs to be performed for the action of for door closing.
+ * Pre: None
+ * Post: Events are added to EventBus
+ */
+void door_will_close();
+/**
+ * Description: This function will add all the events in the event bus
+ * that will needs to be performed when door is closed and will update
+ * the RE_VALUE to RE_MAX to indicate the door has been closed.
+ * Pre: None
+ * Post: Events are added to EventBus
+ */
+void door_has_closed();
+/**
+ * Description: This function will remove all the events in event bus
+ * that are responisble for the movement of door i.e. DOOR_OPEN_BY_20 and
+ * DOOR_CLOSE_BY_20 and will add all the event in th event bus
+ * that needs to be performed for the action of for door halting.
+ * Pre: None
+ * Post: Events are added and removed from EventBus
+ */
+void door_is_halted();
+
+/**
+ * Description: This function is responisble for the calling the procedures
+ * that will change the servo motor module's angle so the door is opened by 20%.
+ * Pre:
+ * Post: Servo angle is update to accommodate the door opening byy 20%
+ */
+void door_open_by_20();
+/**
+ * Description: This function is responisble for the calling the procedures
+ * that will change the servo motor module's angle so the door is closed by 20%.
+ * Pre: None
+ * Post: Servo angle is update to accommodate the door closing by 20%
+ */
+void door_close_by_20();
+
+/**
+ * Description: This function is responsible to show the message on LCD that
+ * displays the current state of the door.
+ * Pre:
+ * Post: The LCD module will have the DOOR_STATUS displayed in a Formatted message.
+ */
+void lcd_show_door_stat();
+/**
+ * Description: This function is responsible to show the message on LCD that
+ * displays the current percentage the door is Open when RE_STATUS is set to
+ * REStatus:change
+ * Pre:
+ * Post:
+ */
+void lcd_show_re_stat();
+
+/**
+ * Description: This function is responisble to calling the proceduers that
+ * will update the AtSign secondary server with the current status of the Door.
+ * Pre:
+ * Post: The remote AtSign secondart server is updated with the current status of
+ * the door.
+ */
+void door_sync_status();
+/**
+ * Description: This function is responisble to calling the proceduers that
+ * will update the AtSign secondary server with the current value of the Rotary Encoder.
+ * Pre:
+ * Post: The remote AtSign secondart server is updated with the current value of RE.
+ */
+void re_sync_status();
+
+/**
+ * Description: This function is responisble to update the GLOBAL variable RE_STATUS to
+ * RE_CHANGE and will add event to display the RE_VALUE on LCD.
+ * Pre: None
+ * Post: The GLOBAL variable is updated, Event is added in EventBus
+ */
+void re_will_change();
+/**
+ * Description: This function is responisble to update the GLOBAL variable RE_STATUS to
+ * RE_SET and will add event to display the RE_VALUE on LCD.
+ * Pre: None
+ * Post: The GLOBAL variable is updated, Event is added in EventBus
+ */
+void re_was_set();
+/**
+ * Description: This function is responisble to add events that will close the door by 20%
+ * and sync the information with AtSign secondary server.
+ * Pre: None
+ * Post: Will add the events in EventBus neccsary to perform manual closing of door by 20%
+ */
+void re_value_increased();
+/**
+ * Description: This function is responisble to add events that will open the door by 20%
+ * and sync the information with AtSign secondary server.
+ * Pre: None
+ * Post: Will add the events in EventBus neccsary to perform manual opening of door by 20%
+ */
+void re_value_decreased();
+
+/**
+ * The array that maps the EventHandler with the numeric value of the
+ * enum Event so that is can be called with easily
+ */
+static void (*(Event_Handlers[15]))() = {
     door_sync_status,
     re_sync_status,
     door_will_open,
@@ -83,79 +346,28 @@ static int (*(Event_Handlers[15]))() = {
     re_value_decreased
 };
 
-class EventBus {
-    deque<Event> events;
-
-public:
-    boolean empty()
-    {
-        return events.empty();
-    }
-
-    Event current()
-    {
-        return events.front();
-    }
-
-    void add(Event e)
-    {
-        events.push_back(e);
-    }
-
-    void sos(Event e)
-    {
-        events.push_front(e);
-    }
-
-    void current_completed()
-    {
-        events.pop_front();
-    }
-};
-
-// static deque<Event> events;
-static EventBus events;
-
-enum DoorStatus {
-    opened = 0,
-    closed = 1,
-    opening = 2,
-    closing = 3
-};
-static DoorStatus DOOR_STATUS
-    = DoorStatus::closed;
-
-enum REStatus {
-    change = 0,
-    set = 1
-};
-static REStatus RE_STATUS = REStatus::set;
-static int RE_VALUE = RE_VALUE_MAX;
-
-static int SERVO_ANGLE = 0;
-
-static AtClient* at_client;
-static AtKey* app_events_key;
-static AtKey* event_bus_key;
-static AtKey* door_status_key;
-static AtKey* re_value_key;
-// static AtKey* door_event_updated_key;
+//-------------- Arduino Setup Handler ------------------------------------------//
 
 void setup()
 {
+    // Initialize the AtSign's
     const auto* chip = new AtSign("@moralbearbanana");
     const auto* java = new AtSign("@batmanariesbanh");
 
+    // Read the encryption and decryption keys
     const auto keys = keys_reader::read_keys(*chip);
+
     at_client = new AtClient(*chip, keys);
 
-    // pkam authenticate into our atServer
+    // Wifi connect and pkam authenticate into AtSign secondary Server
     at_client->pkam_authenticate("hotspot", "12345678");
 
     app_events_key = new AtKey("app_e", java, chip);
     event_bus_key = new AtKey("event_bus", chip, java);
     door_status_key = new AtKey("door_status", chip, java);
     re_value_key = new AtKey("re_value", chip, java);
+
+    // Configure the Arduino Pins and attach the Interrupt Handlers
 
     pinMode(TOUCH_SENSOR, INPUT);
     attachInterrupt(digitalPinToInterrupt(TOUCH_SENSOR), TouchInterruptHandler, RISING);
@@ -167,23 +379,34 @@ void setup()
     pinMode(RE_DAT, INPUT);
     attachInterrupt(digitalPinToInterrupt(RE_CLK), RERotateHandler, FALLING);
 
+    // Start the LCD
     lcd.begin(LCD_WIDTH, LCD_HEIGHT);
+    // Start the Servo
     servo.attach(SERVO);
 
+    // Default values on AtSign secondary server
     at_client->put_ak(*event_bus_key, "");
     at_client->put_ak(*door_status_key, to_string(DoorStatus::closed));
     at_client->put_ak(*re_value_key, to_string(RE_VALUE));
 
-      events.add(Event::LCD_SHOW_DOOR_STAT);
+    // add event on EventBus to show the default door state
+    events.add(Event::LCD_SHOW_DOOR_STAT);
 }
+
+// variables used to track Timers.
 
 static volatile unsigned long APP_E_TIME = millis();
 static volatile unsigned long TKN_TIME = millis();
 static int tkn = -1;
 
+//-------------- Event Handlers ------------------------------------------//
+
 void loop()
 {
     if (events.empty()) {
+
+        // At every 30 second interval update the AtSign secondary server with
+        // a new random token
         if (millis() - TKN_TIME > 30000) {
             tkn = rand() % 100;
             at_client->put_ak(*event_bus_key, std::to_string(tkn));
@@ -191,6 +414,9 @@ void loop()
             TKN_TIME = millis();
         }
 
+        // At every 15 second interval read the AtSign secondary server
+        // to see if an Application event has occured and verify that the
+        // token is within the timeframe
         if (millis() - APP_E_TIME > 15000) {
             string data = at_client->get_ak(*app_events_key);
             std::cout << "\n\n\n\nData: " << data << "\n\n\n\n";
@@ -223,25 +449,15 @@ void loop()
         return;
     }
 
+    // Read the current event that needs to be performed
+
     Event event = events.current();
 
-    auto result = Event_Handlers[event]();
+    // Invoke the Handler
 
-    // if (result) {
-    //     boolean synced = false;
-    //     at_client->put_ak(*event_bus_key, std::to_string(event));
-    //     delay(2000);
-    //     while (!synced) {
-    //         string data = at_client->get_ak(*app_events_key);
-    //         std::cout << "\n\n\n\nData: " << data << "\n\n\n\n";
-    //         string value = "ok" + std::to_string(event);
-    //         if (data == value) {
-    //             synced = true;
-    //             delay(2000);
-    //             at_client->put_ak(*event_bus_key, "-1");
-    //         }
-    //     }
-    // }
+    Event_Handlers[event]();
+
+    // Mark completed and remove
 
     events.current_completed();
 }
@@ -302,7 +518,7 @@ void RERotateHandler()
     }
 }
 
-int door_will_open()
+void door_will_open()
 {
     std::cout << "DOOR IS OPENING\n";
     DOOR_STATUS = DoorStatus::opening;
@@ -313,10 +529,9 @@ int door_will_open()
         events.add(Event::DOOR_OPEN_BY_20);
     }
     events.add(Event::DOOR_OPENED);
-    return 0;
 }
 
-int door_has_opened()
+void door_has_opened()
 {
     std::cout << "DOOR IS OPENED\n";
     DOOR_STATUS = DoorStatus::opened;
@@ -324,11 +539,9 @@ int door_has_opened()
     events.add(Event::SYNC_DOOR);
     RE_VALUE = RE_VALUE_MIN;
     events.add(Event::SYNC_RE);
-
-    return 0;
 }
 
-int door_will_close()
+void door_will_close()
 {
     std::cout << "DOOR IS CLOSING\n";
     DOOR_STATUS = DoorStatus::closing;
@@ -338,10 +551,9 @@ int door_will_close()
         events.add(Event::DOOR_CLOSE_BY_20);
     }
     events.add(Event::DOOR_CLOSED);
-    return 0;
 }
 
-int door_has_closed()
+void door_has_closed()
 {
     std::cout << "DOOR IS CLOSED\n";
     DOOR_STATUS = DoorStatus::closed;
@@ -349,11 +561,9 @@ int door_has_closed()
     events.add(Event::SYNC_DOOR);
     RE_VALUE = RE_VALUE_MAX;
     events.add(Event::SYNC_RE);
-
-    return 0;
 }
 
-int door_is_halted()
+void door_is_halted()
 {
     std::cout << "DOOR HALTED\n";
     if (events.current() == Event::DOOR_HALT) {
@@ -374,24 +584,20 @@ int door_is_halted()
 
     events.add(Event::SYNC_DOOR);
     events.add(Event::SYNC_RE);
-
-    return 0;
 }
 
-int door_sync_status()
+void door_sync_status()
 {
     at_client->put_ak(*door_status_key, std::to_string(DOOR_STATUS));
-    return 0;
 }
 
-int re_sync_status()
+void re_sync_status()
 {
     std::cout << "\n\n\n\nRE_VALUE: " << RE_VALUE << "\n\n\n\n";
     at_client->put_ak(*re_value_key, std::to_string(RE_VALUE));
-    return 0;
 }
 
-int lcd_show_door_stat()
+void lcd_show_door_stat()
 {
     const static std::map<int, std::string> DoorStatusStrings = {
         { DoorStatus::opened, " Opened " },
@@ -405,10 +611,9 @@ int lcd_show_door_stat()
     std::string message = DoorStatusStrings.at(DOOR_STATUS);
     lcd.setCursor(0, 1);
     lcd.write(message.c_str());
-    return 0;
 }
 
-int lcd_show_re_stat()
+void lcd_show_re_stat()
 {
     lcd.setCursor(0, 0);
     lcd.write("DoorOpen");
@@ -419,57 +624,50 @@ int lcd_show_re_stat()
     }
     std::string v = " " + amount + " %  ";
     lcd.write(v.c_str());
-    return 0;
 }
 
-int door_open_by_20()
+void door_open_by_20()
 {
     SERVO_ANGLE = SERVO_ANGLE + (int)(180 / RE_VALUE_MAX);
     servo.write(SERVO_ANGLE);
     delay(1000);
     RE_VALUE -= 1;
-    return 0;
 }
 
-int door_close_by_20()
+void door_close_by_20()
 {
     SERVO_ANGLE = SERVO_ANGLE - (int)(180 / RE_VALUE_MAX);
     servo.write(SERVO_ANGLE);
     delay(1000);
     RE_VALUE += 1;
-    return 0;
 }
 
-int re_will_change()
+void re_will_change()
 {
     RE_STATUS = REStatus::change;
     events.add(Event::LCD_SHOW_RE_STAT);
-    return 0;
 }
 
-int re_was_set()
+void re_was_set()
 {
     RE_STATUS = REStatus::set;
     events.add(Event::LCD_SHOW_DOOR_STAT);
-    return 0;
 }
 
-int re_value_increased()
+void re_value_increased()
 {
     if (RE_VALUE < RE_VALUE_MAX) {
         events.add(Event::DOOR_CLOSE_BY_20);
         events.add(Event::LCD_SHOW_RE_STAT);
         events.add(Event::SYNC_RE);
     }
-    return 0;
 }
 
-int re_value_decreased()
+void re_value_decreased()
 {
     if (RE_VALUE > RE_VALUE_MIN) {
         events.add(Event::DOOR_OPEN_BY_20);
         events.add(Event::LCD_SHOW_RE_STAT);
         events.add(Event::SYNC_RE);
     }
-    return 0;
 }

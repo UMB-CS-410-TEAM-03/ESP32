@@ -1,15 +1,32 @@
 #include "event_bus.h"
 
 template <typename T>
-std::string EventBus<T>::to_string()
-{
-    std::string serialized = "[";
-    for (auto it = this->begin(), end = this->end(); it != end; ++it) {
-        auto e = *it;
-        serialized += std::to_string(e);
-        serialized += ',';
-    }
-    serialized += ']';
+class EventBus {
+    deque<T> events;
 
-    return serialized;
-}
+public:
+    boolean empty()
+    {
+        return events.empty();
+    }
+
+    Event current()
+    {
+        return events.front();
+    }
+
+    void add(T e)
+    {
+        events.push_back(e);
+    }
+
+    void sos(T e)
+    {
+        events.push_front(e);
+    }
+
+    void current_completed()
+    {
+        events.pop_front();
+    }
+};
